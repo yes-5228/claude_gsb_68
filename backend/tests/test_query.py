@@ -88,6 +88,52 @@ def test_statistics_by_station_uses_station_labels(client, station, second_stati
     assert labels["TEST-002"] == "TEST-002 工业园监测点"
 
 
+def test_value_equal_to_limit_is_consistent_across_detail_dashboard_and_export(
+    client, station, entry_payload
+):
+    """取等号记录(PM2.5 日均值恰为限值 75)在明细/看板/统计/导出口径一致, 均判达标。"""
+    client.post(
+        "/api/measurements/entries",
+        json=entry_payload(
+            station.id,
+            measured_at="2026-09-01 10:00",
+            period="daily",
+            entries=[{"pollutant": "PM25", "value": 75.0}, {"pollutant": "SO2", "value": 900.0}],
+        ),
+    )
+
+    # 明细: 等于限值 -> 达标, 倍数恰为 1.0
+    boundary = client.get(
+        "/api/query/measurements?pollutant=PM25"
+    ).get_json()["items"][0]
+    assert boundary["exceed_ratio"] == 1.0
+    assert boundary["is_exceeded"] is False
+
+    # 汇总(查询页): 仅 1 条超标, 等于限值的不算
+    query_summary = client.get("/api/query/measurements").get_json()["summary"]
+    assert query_summary["total"] == 2
+    assert query_summary["exceeded_count"] == 1
+
+    # 看板(运行概览): 与查询页同一个数
+    overview = client.get("/api/meta/overview").get_json()
+    assert overview["measurements"]["exceeded_count"] == 1
+
+    # 分组统计: 贴边因子超标数为 0
+    stats = client.get("/api/query/statistics?group_by=pollutant&metric=count").get_json()
+    exceeded = {item["key"]: item["exceeded_count"] for item in stats["items"]}
+    assert exceeded == {"PM25": 0, "SO2": 1}
+
+    # 仅超标筛选: 等于限值的记录不出现
+    only_exceeded = client.get("/api/query/measurements?is_exceeded=true").get_json()
+    assert only_exceeded["total"] == 1
+    assert only_exceeded["items"][0]["pollutant"] == "SO2"
+
+    # 导出: PM2.5 行的“是否超标”列为“否”, 与明细一致
+    csv_text = client.get("/api/query/export?pollutant=PM25").get_data(as_text=True)
+    row = csv_text.strip().splitlines()[1]
+    assert "否" in row and "是" not in row
+
+
 def test_query_export_respects_filters(client, station, entry_payload):
     _seed_two_days(client, station, entry_payload)
     response = client.get("/api/query/export?pollutant=PM25")
