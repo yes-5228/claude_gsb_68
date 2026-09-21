@@ -28,7 +28,7 @@
 | 数据库 | SQLite(默认, 零依赖) / PostgreSQL 16(可选, compose 覆盖文件) |
 | 前端 | React 18 · React Router 6 · Vite 7 · Axios · 原生 CSS(设计令牌 + 组件类) |
 | 部署 | Docker 多阶段构建 · Nginx 静态托管与 `/api` 反向代理 · docker compose |
-| 测试 | Pytest(43 个后端用例: 接口 + 领域规则) |
+| 测试 | Pytest(48 个后端用例: 接口 + 领域规则) |
 
 ## 目录结构
 
@@ -40,7 +40,7 @@
 │   │   ├── config.py            # 多环境配置 (development/production/testing)
 │   │   ├── extensions.py        # db / cors 单例, SQLite 外键开关
 │   │   ├── errors.py            # 统一异常与 JSON 错误响应
-│   │   ├── commands.py          # flask init-db / seed / reset-db / stats
+│   │   ├── commands.py          # flask init-db / seed / reset-db / stats / recalc-exceedance
 │   │   ├── seed.py              # 演示数据生成与启动引导
 │   │   ├── domain/              # 业务规则: 因子限值、枚举、超标分级
 │   │   ├── models/              # Station / Measurement / Exceedance
@@ -136,8 +136,9 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 | CO | 10 | 4 | mg/m³ |
 | O₃ | 200 | 160 | μg/m³ |
 
-- **判定**: `监测值 > 限值` 即判为超标, 记录限值快照与原值, 避免限值调整后历史数据失真。
-- **分级**: 超标倍数 = 监测值 / 限值; `1.0 ~ 1.5 倍` 为轻度超标, `1.5 ~ 2.0 倍` 为中度超标, `≥ 2.0 倍` 为重度超标。
+- **判定(唯一口径)**: `监测值 > 限值`(严格大于)即判为超标, 记录限值快照与原值, 避免限值调整后历史数据失真。**监测值恰好等于限值(超标倍数正好为 1.0)判为达标**, 不生成超标记录。判定统一由 `exceedance_rules.is_exceedance` 给出, 明细、看板、导出、报表与超标单统计一律以落库的 `is_exceeded` 标志为准, 任何模块都不得再按"超标倍数 ≥ 1"或自行比较监测值/限值重新计数。
+- **超标倍数**: `监测值 / 限值`, 按 6 位小数落库, 仅用于展示与分级; 因精度远高于监测值(1~2 位小数), 贴限值的达标数据(如 199.9/200 = 0.9995)舍入后仍严格小于 1.0, 不会与超标标志位产生分歧。
+- **分级**: 仅对已超标记录按超标倍数分级; `1.0 ~ 1.5 倍` 为轻度超标, `1.5 ~ 2.0 倍` 为中度超标, `≥ 2.0 倍` 为重度超标。
 - **无 1 小时限值的因子**(PM2.5、PM10 小时值)仅记录数值, 不参与超标判定, 避免误报。
 - **标注状态**: `待标注(pending)` 由系统自动创建, 人工标注为 `已确认(confirmed)` 或 `已忽略(ignored)`; 确认与忽略都必须填写标注说明, 用于后续追溯。
 
@@ -228,7 +229,7 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 
 ```bash
 cd backend
-python -m pytest -q          # 43 个用例: 台账 CRUD/级联、录入与超标判定、标注规则、查询统计与导出、元数据接口
+python -m pytest -q          # 48 个用例: 台账 CRUD/级联、录入与超标判定、标注规则、查询统计与导出、元数据接口
 
 cd frontend
 npm run build                # 生产构建校验
@@ -238,8 +239,9 @@ npm run build                # 生产构建校验
 
 ```bash
 curl http://localhost:5000/api/meta/health
-python -m flask --app wsgi stats      # 查看监测点/数据/超标记录数量
-python -m flask --app wsgi reset-db   # 重置数据库并重建演示数据
+python -m flask --app wsgi stats        # 查看监测点/数据/超标记录数量
+python -m flask --app wsgi recalc-exceedance  # 按当前超标边界口径重算历史数据并同步超标单
+python -m flask --app wsgi reset-db     # 重置数据库并重建演示数据
 ```
 
 ## 常见问题

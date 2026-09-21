@@ -1,4 +1,72 @@
 """数据查询与统计接口测试."""
+from app.models import Exceedance, Measurement
+
+
+def _seed_boundary_batch(client, station, entry_payload):
+    """同一时刻各因子: 2 条贴限值(达标) + 2 条超标, 覆盖四舍五入到 1.0 的场景。"""
+    client.post(
+        "/api/measurements/entries",
+        json=entry_payload(
+            station.id,
+            measured_at="2026-09-01 10:00",
+            period="hourly",
+            entries=[
+                {"pollutant": "O3", "value": 200.0},    # 恰好等于限值 -> 达标
+                {"pollutant": "NO2", "value": 199.9},   # 0.9995 倍 -> 达标
+                {"pollutant": "SO2", "value": 600.0},   # 1.2 倍 -> 超标
+                {"pollutant": "CO", "value": 12.0},     # 1.2 倍 -> 超标
+            ],
+        ),
+    )
+
+
+def test_boundary_counts_agree_across_detail_dashboard_report_and_export(
+    client, station, entry_payload
+):
+    _seed_boundary_batch(client, station, entry_payload)
+
+    # 明细: 标志位筛选与同页汇总必须一致
+    measurements = client.get("/api/measurements?is_exceeded=true").get_json()
+    query = client.get("/api/query/measurements?is_exceeded=true").get_json()
+    assert measurements["total"] == 2
+    assert measurements["summary"]["exceeded_count"] == 2
+    assert query["total"] == 2
+    assert query["summary"]["exceeded_count"] == 2
+
+    # 看板: 监测数据超标数 == 超标记录数
+    overview = client.get("/api/meta/overview").get_json()
+    assert overview["measurements"]["exceeded_count"] == 2
+    assert overview["exceedances"]["total"] == 2
+    assert overview["exceedances"]["pending"] == 2
+
+    # 聚合报表: 各分组的超标数合计
+    stats = client.get("/api/query/statistics?group_by=pollutant&metric=count").get_json()
+    assert stats["totals"]["exceeded_count"] == 2
+
+    # 落库不变量 1: 监测值严格小于限值的记录, 倍数舍入后仍须 < 1
+    # (旧实现把 199.9/200=0.9995 舍入成 1.0, 给了"倍数>=1"二次统计可乘之机)
+    rounded_up = (
+        Measurement.query.filter(Measurement.value < Measurement.limit_value)
+        .filter(Measurement.exceed_ratio >= 1.0)
+        .count()
+    )
+    assert rounded_up == 0
+    # 落库不变量 2: 标志位永远与"值 > 限值"的边界口径一致
+    assert all(
+        bool(row.is_exceeded) is (row.value > row.limit_value)
+        for row in Measurement.query.filter(Measurement.limit_value.isnot(None)).all()
+    )
+    # 恰好等于限值: 倍数展示为 1.0, 但取等号判达标、以标志位为准, 不建超标单
+    exact = Measurement.query.filter_by(pollutant="O3", value=200.0).one()
+    assert exact.is_exceeded is False
+    assert exact.exceed_ratio == 1.0
+    assert Exceedance.query.count() == 2
+
+    # 导出: 全量 4 行中"是否超标=是"恰为 2 行
+    csv_text = client.get("/api/query/export").get_data(as_text=True)
+    rows = csv_text.lstrip("\ufeff").strip().splitlines()[1:]
+    assert len(rows) == 4
+    assert sum(1 for line in rows if ",是," in line) == 2
 
 
 def _seed_two_days(client, station, entry_payload):

@@ -187,3 +187,44 @@ def delete_measurement(measurement):
     db.session.delete(measurement)
     db.session.commit()
     return payload
+
+
+def recalculate_all():
+    """按当前唯一判定口径重算全部历史数据并同步超标记录。
+
+    用于限值边界/倍数精度口径调整后的数据回填: 不重新录入, 仅以
+    ``exceedance_rules.evaluate`` 的结果刷新 limit_value / exceed_ratio /
+    is_exceeded 及其超标单, 保证存量数据与新数据同口径。
+    返回各类变更条数。
+    """
+    from ..domain.standards import get_pollutant
+
+    stats = {"rows": 0, "flag_changed": 0, "ratio_changed": 0,
+             "exceedances_created": 0, "exceedances_removed": 0}
+    records = Measurement.query.order_by(Measurement.id).all()
+    for record in records:
+        meta = get_pollutant(record.pollutant)
+        if meta is None:
+            continue
+        evaluation = exceedance_rules.evaluate(record.pollutant, record.period, record.value)
+
+        if bool(record.is_exceeded) != bool(evaluation["exceeded"]):
+            stats["flag_changed"] += 1
+        if record.exceed_ratio != evaluation["ratio"]:
+            stats["ratio_changed"] += 1
+        had_exceedance = record.exceedance is not None
+
+        record.limit_value = evaluation["limit"]
+        record.exceed_ratio = evaluation["ratio"]
+        record.is_exceeded = evaluation["exceeded"]
+        _sync_exceedance(record, meta, evaluation)
+        db.session.flush()
+
+        if not had_exceedance and record.exceedance is not None:
+            stats["exceedances_created"] += 1
+        elif had_exceedance and record.exceedance is None:
+            stats["exceedances_removed"] += 1
+        stats["rows"] += 1
+
+    db.session.commit()
+    return stats

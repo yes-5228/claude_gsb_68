@@ -138,3 +138,30 @@ def test_export_measurements_csv(client, station, entry_payload):
     assert text.startswith("\ufeff站点编码")
     assert "测试监测点" in text
     assert len([line for line in text.strip().splitlines()]) == 4
+
+
+def test_recalculate_repairs_legacy_rounded_ratio(client, station, entry_payload):
+    """旧口径把 199.9/200 的倍数舍入成 1.0 但标志为达标; 重算后收敛一致。"""
+    from app.services import measurement_service
+
+    client.post(
+        "/api/measurements/entries",
+        json=entry_payload(
+            station.id,
+            period="hourly",
+            entries=[{"pollutant": "O3", "value": 199.9}, {"pollutant": "SO2", "value": 600.0}],
+        ),
+    )
+    # 模拟旧版本(3 位小数)留下的歧义落库值: 达标但倍数=1.0
+    legacy = Measurement.query.filter_by(pollutant="O3").one()
+    legacy.exceed_ratio = 1.0
+
+    result = measurement_service.recalculate_all()
+    assert result["rows"] == 2
+    assert result["ratio_changed"] >= 1
+
+    repaired = Measurement.query.filter_by(pollutant="O3").one()
+    assert repaired.is_exceeded is False
+    assert repaired.exceed_ratio < 1.0
+    # 超标记录不受影响, 仍只有 SO2 一条
+    assert Exceedance.query.count() == 1

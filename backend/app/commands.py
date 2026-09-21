@@ -52,3 +52,15 @@ def register_commands(app):
                 Exceedance.query.count(),
             )
         )
+
+    @app.cli.command("recalc-exceedance")
+    def recalc_exceedance():
+        """按当前超标边界口径重算历史数据的倍数/标志并同步超标记录."""
+        from .services import measurement_service
+
+        result = measurement_service.recalculate_all()
+        click.echo(
+            "重算完成: 监测数据 %(rows)d 条, 标志修正 %(flag_changed)d 条, "
+            "倍数修正 %(ratio_changed)d 条, 新增超标单 %(exceedances_created)d 条, "
+            "撤销超标单 %(exceedances_removed)d 条" % result
+        )
